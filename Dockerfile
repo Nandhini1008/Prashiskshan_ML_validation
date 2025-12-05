@@ -31,8 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY *.py ./
 
-# Copy .env file if exists (for local testing)
-COPY .env* ./ 2>/dev/null || true
+# Note: .env file should be set via Render environment variables, not copied
 
 # Expose port
 EXPOSE 8003
