@@ -1,0 +1,29 @@
+# Company Validation Service - Dependencies
+
+# API Framework
+fastapi==0.104.0
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# HTTP Requests
+requests==2.31.0
+urllib3==2.1.0
+
+# Web Scraping
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Selenium (for GST validation - headless mode)
+selenium==4.15.0
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Reddit API
+praw==7.7.1
+
+# Tavily API (for Zaubacorp scraping)
+# No separate package needed - uses requests
+
+# Google Generative AI (for LinkedIn analysis)
+google-generativeai==0.3.0
