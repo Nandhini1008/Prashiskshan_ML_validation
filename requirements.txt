@@ -15,6 +15,7 @@ lxml==4.9.3
 
 # Selenium (for GST validation - headless mode)
 selenium==4.15.0
+webdriver-manager==4.0.1
 
 # Environment Variables
 python-dotenv==1.0.0
