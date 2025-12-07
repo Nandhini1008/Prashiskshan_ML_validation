@@ -39,13 +39,15 @@ class ValidationRequest(BaseModel):
     company_name: str = Field(..., description="Name of the company", min_length=2)
     cin_number: str = Field(..., description="Corporate Identification Number (21 characters)", min_length=21, max_length=21)
     gst_number: str = Field(..., description="GST Identification Number (15 characters)", min_length=15, max_length=15)
+    domain: Optional[str] = Field(None, description="Company website domain (optional, for WHOIS validation)")
     
     class Config:
         schema_extra = {
             "example": {
                 "company_name": "ZOHO CORPORATION PRIVATE LIMITED",
                 "cin_number": "U40100TN2010PTC075961",
-                "gst_number": "33AABCT1332L1ZU"
+                "gst_number": "33AABCT1332L1ZU",
+                "domain": "zoho.com"
             }
         }
 
@@ -86,7 +88,8 @@ async def health_check():
             "gst_validation": "ready",
             "mca_validation": "ready (Tavily API)",
             "reddit_check": "ready",
-            "linkedin_check": "ready"
+            "linkedin_check": "ready",
+            "whois_check": "ready"
         }
     }
 
@@ -101,22 +104,31 @@ async def validate_company(request: ValidationRequest):
     - MCA/CIN validation (via Zaubacorp + Tavily)
     - Reddit scam check
     - LinkedIn employability check
+    - WHOIS domain check (if domain provided)
     
     Returns legitimacy assessment with scoring and flags.
     """
     try:
+        # Trim whitespace from all inputs to ensure clean data
+        company_name = request.company_name.strip()
+        cin_number = request.cin_number.strip()
+        gst_number = request.gst_number.strip()
+        domain = request.domain.strip() if request.domain else None
+        
         print(f"\n{'='*80}")
         print(f"📥 Received validation request")
-        print(f"   Company: {request.company_name}")
-        print(f"   CIN: {request.cin_number}")
-        print(f"   GST: {request.gst_number}")
+        print(f"   Company: {company_name}")
+        print(f"   CIN: {cin_number}")
+        print(f"   GST: {gst_number}")
+        print(f"   Domain: {domain if domain else 'N/A'}")
         print(f"{'='*80}\n")
         
         # Create validator
         validator = CompanyLegitimacyValidator(
-            company_name=request.company_name,
-            cin_number=request.cin_number,
-            gst_number=request.gst_number
+            company_name=company_name,
+            cin_number=cin_number,
+            gst_number=gst_number,
+            domain=domain
         )
         
         # Run all validations
@@ -163,15 +175,22 @@ async def validate_company_async(request: ValidationRequest, background_tasks: B
     
     Note: For production, implement proper task queue (Celery, Redis, etc.)
     """
-    task_id = f"{request.company_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Trim whitespace from all inputs to ensure clean data
+    company_name = request.company_name.strip()
+    cin_number = request.cin_number.strip()
+    gst_number = request.gst_number.strip()
+    domain = request.domain.strip() if request.domain else None
+    
+    task_id = f"{company_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # In production, you'd store this in Redis/database
     # For now, just start the background task
     background_tasks.add_task(
         run_validation_background,
-        request.company_name,
-        request.cin_number,
-        request.gst_number,
+        company_name,
+        cin_number,
+        gst_number,
+        domain,
         task_id
     )
     
@@ -183,13 +202,14 @@ async def validate_company_async(request: ValidationRequest, background_tasks: B
     }
 
 
-async def run_validation_background(company_name: str, cin_number: str, gst_number: str, task_id: str):
+async def run_validation_background(company_name: str, cin_number: str, gst_number: str, domain: Optional[str], task_id: str):
     """Background task for validation"""
     try:
         validator = CompanyLegitimacyValidator(
             company_name=company_name,
             cin_number=cin_number,
-            gst_number=gst_number
+            gst_number=gst_number,
+            domain=domain
         )
         
         result = await validator.run_all_validations()
@@ -216,7 +236,8 @@ async def api_info():
                 "request_body": {
                     "company_name": "string (min 2 chars)",
                     "cin_number": "string (exactly 21 chars)",
-                    "gst_number": "string (exactly 15 chars)"
+                    "gst_number": "string (exactly 15 chars)",
+                    "domain": "string (optional)"
                 },
                 "response": {
                     "success": "boolean",
@@ -235,22 +256,24 @@ async def api_info():
             "GST (gstsearch.in)",
             "MCA/CIN (zaubacorp.com via Tavily API)",
             "Reddit (scam reports)",
-            "LinkedIn (employability signals)"
+            "LinkedIn (employability signals)",
+            "WHOIS (who.is - domain registration)"
         ],
         "scoring": {
-            "total_score": "0-100",
+            "total_score": "0-110",
             "breakdown": {
                 "gst_validation": "0-30 points",
                 "mca_validation": "0-30 points",
                 "cin_consistency": "0-10 points",
                 "reddit_reputation": "0-20 points",
-                "linkedin_employability": "0-10 points"
+                "linkedin_employability": "0-10 points",
+                "whois_domain": "0-10 points"
             },
             "classifications": {
-                "80-100": "LEGITIMATE (High confidence)",
-                "60-79": "LIKELY LEGITIMATE (Medium confidence)",
-                "40-59": "QUESTIONABLE (Low confidence)",
-                "0-39": "NOT LEGITIMATE (High confidence)"
+                "75-100%": "LEGITIMATE (High confidence)",
+                "60-74%": "LIKELY LEGITIMATE (Medium confidence)",
+                "40-59%": "QUESTIONABLE (Low confidence)",
+                "0-39%": "NOT LEGITIMATE (High confidence)"
             }
         },
         "example_curl": """
@@ -259,7 +282,8 @@ curl -X POST http://localhost:8003/validate-company \\
   -d '{
     "company_name": "ZOHO CORPORATION PRIVATE LIMITED",
     "cin_number": "U40100TN2010PTC075961",
-    "gst_number": "33AABCT1332L1ZU"
+    "gst_number": "33AABCT1332L1ZU",
+    "domain": "zoho.com"
   }'
         """
     }

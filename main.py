@@ -32,6 +32,7 @@ from mca import MCAAutomationAgent
 from zaubacorp_tavily import ZaubacorpTavilyScraper
 from reddit import check_company_internship_scams
 from linked import CompanyResearchAgent
+from whosi import get_domain_whois_info
 
 
 class CompanyLegitimacyValidator:
@@ -44,7 +45,7 @@ class CompanyLegitimacyValidator:
     CIN_PATTERN = r'^[LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}$'
     GST_PATTERN = r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
     
-    def __init__(self, company_name: str, cin_number: str, gst_number: str):
+    def __init__(self, company_name: str, cin_number: str, gst_number: str, domain: str = None):
         """
         Initialize the validator
         
@@ -52,16 +53,19 @@ class CompanyLegitimacyValidator:
             company_name: Name of the company
             cin_number: Corporate Identification Number (21 characters)
             gst_number: GST Identification Number (15 characters)
+            domain: Company website domain (optional)
         """
         self.company_name = company_name.strip()
         self.cin_number = cin_number.strip().upper()
         self.gst_number = gst_number.strip().upper()
+        self.domain = domain.strip() if domain else None
         
         # Results storage
         self.gst_result = None
         self.mca_result = None
         self.reddit_result = None
         self.linkedin_result = None
+        self.whois_result = None
         self.validation_start_time = None
         self.validation_end_time = None
         
@@ -276,6 +280,48 @@ class CompanyLegitimacyValidator:
                 "error": str(e)
             }
     
+    async def validate_whois_async(self) -> Dict[str, Any]:
+        """Run WHOIS domain check asynchronously"""
+        if not self.domain:
+            return {
+                "domain": None,
+                "skipped": True,
+                "message": "No domain provided"
+            }
+        
+        print(f"🔍 Starting WHOIS check for {self.domain}...")
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            def run_whois_check():
+                try:
+                    # Clean domain - remove http/https and trailing slashes
+                    clean_domain = self.domain.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
+                    result = get_domain_whois_info(clean_domain, headless=True)
+                    return result
+                except Exception as e:
+                    return {
+                        "domain": self.domain,
+                        "error": str(e)
+                    }
+            
+            result = await loop.run_in_executor(None, run_whois_check)
+            
+            if result and not result.get('error'):
+                print(f"✅ WHOIS check complete")
+            else:
+                print(f"❌ WHOIS check failed: {result.get('error') if result else 'Unknown error'}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ WHOIS check error: {str(e)}")
+            return {
+                "domain": self.domain,
+                "error": str(e)
+            }
+    
     async def run_all_validations(self) -> Dict[str, Any]:
         """Run all validations concurrently"""
         print("\n" + "=" * 80)
@@ -312,10 +358,11 @@ class CompanyLegitimacyValidator:
         mca_task = asyncio.create_task(self.validate_mca_async())
         reddit_task = asyncio.create_task(self.validate_reddit_async())
         linkedin_task = asyncio.create_task(self.validate_linkedin_async())
+        whois_task = asyncio.create_task(self.validate_whois_async())
         
         # Wait for all to complete
-        self.gst_result, self.mca_result, self.reddit_result, self.linkedin_result = await asyncio.gather(
-            gst_task, mca_task, reddit_task, linkedin_task
+        self.gst_result, self.mca_result, self.reddit_result, self.linkedin_result, self.whois_result = await asyncio.gather(
+            gst_task, mca_task, reddit_task, linkedin_task, whois_task
         )
         
         self.validation_end_time = time.time()
@@ -355,6 +402,7 @@ class CompanyLegitimacyValidator:
         consistency_score = 0
         reddit_score = 0
         linkedin_score = 0
+        whois_score = 0
         total_score = 0
         
         red_flags = []
@@ -428,19 +476,54 @@ class CompanyLegitimacyValidator:
         else:
             linkedin_score = 5  # Neutral if no data
         
-        # Calculate total score
-        total_score = gst_score + mca_score + consistency_score + reddit_score + linkedin_score
+        # Analyze WHOIS data (10 points max)
+        if self.whois_result and not self.whois_result.get('error') and not self.whois_result.get('skipped'):
+            whois_score = 5  # Base score for having valid WHOIS data
+            green_flags.append("Domain has valid WHOIS registration")
+            
+            # Check domain age from Important Dates
+            important_dates = self.whois_result.get('important_dates', {})
+            created_date = important_dates.get('created', '')
+            
+            if created_date:
+                try:
+                    # Parse the date and check age
+                    from dateutil import parser
+                    created = parser.parse(created_date)
+                    age_years = (datetime.now() - created).days / 365.25
+                    
+                    if age_years >= 2:
+                        whois_score += 5
+                        green_flags.append(f"Domain is {int(age_years)} years old (established)")
+                    elif age_years >= 1:
+                        whois_score += 3
+                        green_flags.append(f"Domain is {int(age_years)} years old")
+                    else:
+                        whois_score += 1
+                        red_flags.append(f"Domain is less than 1 year old (new domain)")
+                except Exception as e:
+                    whois_score += 2  # Partial points if date parsing fails
+        elif self.whois_result and self.whois_result.get('skipped'):
+            whois_score = 5  # Neutral if skipped
+        else:
+            red_flags.append("WHOIS validation failed or domain not provided")
         
-        # Determine legitimacy classification
-        if total_score >= 80:
+        # Calculate total score
+        total_score = gst_score + mca_score + consistency_score + reddit_score + linkedin_score + whois_score
+        
+        # Determine legitimacy classification (adjusted for 110 max score)
+        max_score = 110
+        score_percentage = (total_score / max_score) * 100
+        
+        if score_percentage >= 75:
             classification = "LEGITIMATE"
             confidence = "HIGH"
             legitimacy_status = "✅ COMPANY IS LEGITIMATE"
-        elif total_score >= 60:
+        elif score_percentage >= 60:
             classification = "LIKELY LEGITIMATE"
             confidence = "MEDIUM"
             legitimacy_status = "⚠️ COMPANY IS LIKELY LEGITIMATE (Some concerns)"
-        elif total_score >= 40:
+        elif score_percentage >= 40:
             classification = "QUESTIONABLE"
             confidence = "LOW"
             legitimacy_status = "⚠️ COMPANY LEGITIMACY IS QUESTIONABLE"
@@ -463,13 +546,15 @@ class CompanyLegitimacyValidator:
                 "classification": classification,
                 "confidence_level": confidence,
                 "total_score": total_score,
-                "max_score": 100,
+                "max_score": 110,
+                "score_percentage": round(score_percentage, 2),
                 "score_breakdown": {
                     "gst_validation_score": gst_score,
                     "mca_validation_score": mca_score,
                     "cin_consistency_score": consistency_score,
                     "reddit_reputation_score": reddit_score,
-                    "linkedin_employability_score": linkedin_score
+                    "linkedin_employability_score": linkedin_score,
+                    "whois_domain_score": whois_score
                 }
             },
             "flags": {
@@ -480,7 +565,8 @@ class CompanyLegitimacyValidator:
                 "gst_validation": self.gst_result,
                 "mca_validation": self.mca_result,
                 "reddit_scam_check": self.reddit_result,
-                "linkedin_employability": self.linkedin_result
+                "linkedin_employability": self.linkedin_result,
+                "whois_domain_check": self.whois_result
             }
         }
         
@@ -488,13 +574,14 @@ class CompanyLegitimacyValidator:
         print(f"Status: {legitimacy_status}")
         print(f"Classification: {classification}")
         print(f"Confidence: {confidence}")
-        print(f"Total Score: {total_score}/100")
+        print(f"Total Score: {total_score}/110 ({score_percentage:.1f}%)")
         print(f"\nScore Breakdown:")
         print(f"  - GST Validation: {gst_score}/30")
         print(f"  - MCA Validation: {mca_score}/30")
         print(f"  - CIN Consistency: {consistency_score}/10")
         print(f"  - Reddit Reputation: {reddit_score}/20")
         print(f"  - LinkedIn Employability: {linkedin_score}/10")
+        print(f"  - WHOIS Domain Check: {whois_score}/10")
         
         if green_flags:
             print(f"\n✅ Green Flags ({len(green_flags)}):")
@@ -529,25 +616,28 @@ class CompanyLegitimacyValidator:
 async def main():
     """Main entry point"""
     if len(sys.argv) < 4:
-        print("Usage: python main.py \"<company_name>\" <cin_number> <gst_number>")
+        print("Usage: python main.py \"<company_name>\" <cin_number> <gst_number> [domain]")
         print("\nExample:")
-        print('  python main.py "Zoho Corporation" U72900KA2018PTC123456 29AABCT1332L1ZU')
+        print('  python main.py "Zoho Corporation" U72900KA2018PTC123456 29AABCT1332L1ZU zoho.com')
         print("\nNote:")
         print("  - Company name should be in quotes if it contains spaces")
         print("  - CIN number must be exactly 21 characters")
         print("  - GST number must be exactly 15 characters")
-        print("  - GST and MCA validations run in headless mode by default")
+        print("  - Domain is optional (for WHOIS validation)")
+        print("  - All validations run in headless mode by default")
         sys.exit(1)
     
     company_name = sys.argv[1]
     cin_number = sys.argv[2]
     gst_number = sys.argv[3]
+    domain = sys.argv[4] if len(sys.argv) > 4 else None
     
     # Create validator
     validator = CompanyLegitimacyValidator(
         company_name=company_name,
         cin_number=cin_number,
-        gst_number=gst_number
+        gst_number=gst_number,
+        domain=domain
     )
     
     # Run validations
